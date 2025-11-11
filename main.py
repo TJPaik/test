@@ -1,15 +1,15 @@
-
+import os
 import torch
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 import pytorch_lightning as pl
 from torch_geometric.data import Dataset
 from pytorch_lightning.callbacks import TQDMProgressBar, ModelCheckpoint
-from torchmetrics import Accuracy, ConfusionMatrix, R2Score
+from torchmetrics import Accuracy, ConfusionMatrix, R2Score, F1Score
 
 # Import models from their new locations
-from models.hypergraph.hypernetwork import HyperGNN
 from models.hypergraph.transformer import HyperTransformer
+from models.hypergraph.dhg_wrappers import DHGModelWrapper, build_dhg_model
 from models.bipartite.bipartite_network import BipartiteGNN
 from models.bipartite.transformer import BipartiteTransformer, LaplacianPositionalTransformer
 
@@ -64,6 +64,23 @@ class GraphDataModule(pl.LightningDataModule):
         # However, the original code processes one graph at a time, so we will do the same.
         return batch
 
+def compute_hypergraph_stats(subset: Subset):
+    dataset = getattr(subset, 'dataset', subset)
+    indices = getattr(subset, 'indices', range(len(subset)))
+    max_hyperedge_order = 0
+    for idx in indices:
+        data = dataset[idx]
+        hyperedge_ids = data.hyperedge_index[1]
+        if hyperedge_ids.numel() == 0:
+            continue
+        counts = torch.bincount(
+            hyperedge_ids,
+            minlength=int(hyperedge_ids.max().item()) + 1
+        )
+        if counts.numel() > 0:
+            max_hyperedge_order = max(max_hyperedge_order, int(counts.max().item()))
+    return {"max_hyperedge_order": max_hyperedge_order}
+
 class LitGraphModel(pl.LightningModule):
     def __init__(self, model, learning_rate=1e-3, num_classes=None):
         super().__init__()
@@ -100,6 +117,8 @@ class LitGraphModel(pl.LightningModule):
         self.test_r2 = R2Score()
         self.test_accuracy = Accuracy(task="multiclass", num_classes=self.num_classes)
         self.test_conf_matrix = ConfusionMatrix(task="multiclass", num_classes=self.num_classes)
+        self.test_macro_f1 = F1Score(task="multiclass", num_classes=self.num_classes, average="macro")
+        self.test_per_class_f1 = F1Score(task="multiclass", num_classes=self.num_classes, average=None)
 
         # For tracking class distribution
         self.class_counts = torch.zeros(self.num_classes)
@@ -109,10 +128,11 @@ class LitGraphModel(pl.LightningModule):
         # The models expect a single data object, not a batch. We iterate.
         outputs = []
         for data in batch:
+            data = data.to(self.device)
             if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
                  out = self.model(data.x, data.edge_index, data.edge_attr)
-            else: # HyperGNN, HyperTransformer
-                 out = self.model(data.x, data.hyperedge_index)
+            else: # Hyper models
+                 out = self.model(data.x, data.hyperedge_index, data)
 
             # Ensure out has a batch dimension if needed
             if out.dim() == 1:
@@ -131,6 +151,7 @@ class LitGraphModel(pl.LightningModule):
         outs = []
         targets = []
         for data in batch:
+            data = data.to(self.device)
             if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
                  out = self.model(data.x, data.edge_index, data.edge_attr)
             else: # HyperGNN, HyperTransformer
@@ -217,6 +238,7 @@ class LitGraphModel(pl.LightningModule):
         outs = []
         targets = []
         for data in batch:
+            data = data.to(self.device)
             if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
                  out = self.model(data.x, data.edge_index, data.edge_attr)
             else: # HyperGNN, HyperTransformer
@@ -277,6 +299,7 @@ class LitGraphModel(pl.LightningModule):
         outs = []
         targets = []
         for data in batch:
+            data = data.to(self.device)
             if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
                  out = self.model(data.x, data.edge_index, data.edge_attr)
             else: # HyperGNN, HyperTransformer
@@ -302,6 +325,8 @@ class LitGraphModel(pl.LightningModule):
                 # Update accuracy metric
                 self.test_accuracy.update(pred, target)
                 self.test_conf_matrix.update(pred, target)
+                self.test_macro_f1.update(pred, target)
+                self.test_per_class_f1.update(pred, target)
             else:
                 target = data.y.unsqueeze(0)
                 loss += self.criterion(out, target)
@@ -320,9 +345,16 @@ class LitGraphModel(pl.LightningModule):
         if self.classification:
             cm = self.test_conf_matrix.compute()
             print(f"\nTest Confusion Matrix:\n{cm}")
+            macro_f1 = self.test_macro_f1.compute()
+            per_class_f1 = self.test_per_class_f1.compute()
+            self.log('test_macro_f1', macro_f1)
+            print(f"Test Macro F1: {macro_f1:.4f}")
+            print(f"Per-class F1: {per_class_f1}")
 
             self.test_accuracy.reset()
             self.test_conf_matrix.reset()
+            self.test_macro_f1.reset()
+            self.test_per_class_f1.reset()
         else:
             self.log('test_r2', self.test_r2.compute(), prog_bar=True)
 
@@ -350,90 +382,147 @@ class LitGraphModel(pl.LightningModule):
 
 if __name__ == '__main__':
     # --- Configuration ---
-    MAX_EPOCHS = 100  # Increased for better convergence
+    MAX_EPOCHS = int(os.environ.get("MAX_EPOCHS", 5))
+
+    hypergraph_model_registry = {
+        "HyperTransformer": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: HyperTransformer(
+                in_channels=in_c,
+                hidden_channels=512,
+                out_channels=out_c,
+                num_layers=8,
+                num_heads=16,
+                dropout=0.3,
+            ),
+        },
+        "HyperGT": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("HyperGT", in_c, out_c, stats=stats),
+        },
+        "DPHGNN": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("DPHGNN", in_c, out_c, stats=stats),
+        },
+        "HJRL": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("HJRL", in_c, out_c, stats=stats),
+        },
+        "AllSetformer": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("AllSetformer", in_c, out_c, stats=stats),
+        },
+        "SheafHyperGNN": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("SheafHyperGNN", in_c, out_c, stats=stats),
+        },
+        "TFHNN": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("TFHNN", in_c, out_c, stats=stats),
+        },
+        "EHNN": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model(
+                "EHNN",
+                in_c,
+                out_c,
+                overrides={"max_edge_order_hint": (stats or {}).get("max_hyperedge_order", 32)},
+                stats=stats,
+            ),
+        },
+        "HyperND": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("HyperND", in_c, out_c, stats=stats),
+        },
+        "PhenomNN": {
+            "constructor": lambda in_c, out_c, _sample, stats=None, **__: build_dhg_model("PhenomNN", in_c, out_c, stats=stats),
+        },
+    }
+
+    enabled_hg_names = os.environ.get("HYP_MODELS")
+    if enabled_hg_names:
+        requested = [name.strip() for name in enabled_hg_names.split(",") if name.strip()]
+        hypergraph_models = {name: hypergraph_model_registry[name] for name in requested if name in hypergraph_model_registry}
+        if not hypergraph_models:
+            hypergraph_models = hypergraph_model_registry
+    else:
+        hypergraph_models = hypergraph_model_registry
 
     # Define datasets and the models to run on them
     CONFIG = {
         "hypergraph": {
             "data_path": "classification_hypergraph_dataset.pt",
-            "models": { "HyperTransformer": { "constructor": lambda in_c, out_c: HyperTransformer(in_channels=in_c, hidden_channels=512, out_channels=out_c, num_layers=8, num_heads=16, dropout=0.3), }, }
+            "models": hypergraph_models,
         },
         "bipartite": {
             "data_path": "classification_bipartite_dataset.pt",
-            "models": { "LaplacianPositionalTransformer": { "constructor": lambda in_c, out_c, edge_c: LaplacianPositionalTransformer(in_channels=in_c, edge_attr_channels=edge_c, hidden_channels=256, out_channels=out_c), },}
+            "models": {
+                "LaplacianPositionalTransformer": {
+                    "constructor": lambda in_c, out_c, edge_c, *_, **__: LaplacianPositionalTransformer(
+                        in_channels=in_c,
+                        edge_attr_channels=edge_c,
+                        hidden_channels=256,
+                        out_channels=out_c,
+                    )
+                },
+            },
+        },
+        "clique": {
+            "data_path": "classification_clique_dataset.pt",
+            "models": {
+                "LaplacianPositionalTransformer": {
+                    "constructor": lambda in_c, out_c, edge_c, *_, **__: LaplacianPositionalTransformer(
+                        in_channels=in_c,
+                        edge_attr_channels=edge_c,
+                        hidden_channels=256,
+                        out_channels=out_c,
+                    )
+                },
+            },
         },
     }
-
-
 
     # --- Training Loop ---
     for dataset_name, dataset_config in CONFIG.items():
         print(f"--- Training on {dataset_name} dataset ---")
 
-        # Initialize DataModule with moderate batch size
-        data_module = GraphDataModule(dataset_config["data_path"], batch_size=4) # Moderate batch size for stable training
-
-        # Setup the data module to load the dataset
+        data_module = GraphDataModule(dataset_config["data_path"], batch_size=16) # Moderate batch size for stable training
         data_module.setup()
 
-        # Get a sample from the dataset to determine dimensions
         sample_data = data_module.train_dataset[0]
-
-        # Extract dimensions from the sample
-        in_channels = sample_data.x.shape[1]  # Number of input features
+        in_channels = sample_data.x.shape[1]
 
         if dataset_name.startswith("hypergraph"):
-            out_channels = sample_data.y.shape[0]  # Number of classes for hypergraph
-        else:  # bipartite
-            out_channels = sample_data.y.shape[0]  # Number of classes for bipartite
-            edge_attr_channels = sample_data.edge_attr.shape[1]  # Edge feature dimensions
+            out_channels = sample_data.y.shape[0]
+        else:
+            out_channels = sample_data.y.shape[0]
+            edge_attr_channels = sample_data.edge_attr.shape[1] if hasattr(sample_data, "edge_attr") and sample_data.edge_attr is not None else 0
 
         print(f"Dataset dimensions - in_channels: {in_channels}, out_channels: {out_channels}")
-        if dataset_name.startswith("bipartite"):
+        if dataset_name.startswith(("bipartite", "clique")):
             print(f"Edge attribute channels: {edge_attr_channels}")
+
+        dataset_stats = compute_hypergraph_stats(data_module.train_dataset) if dataset_name.startswith("hypergraph") else {}
 
         for model_name, model_config in dataset_config["models"].items():
             print(f"--- Training model: {model_name} ---")
 
-            # Initialize model with dimensions from the dataset
-            if dataset_name.startswith("bipartite"):
-                model = model_config["constructor"](in_channels, out_channels, edge_attr_channels)
-            else:  # hypergraph
-                model = model_config["constructor"](in_channels, out_channels)
+            if dataset_name.startswith(("bipartite", "clique")):
+                model = model_config["constructor"](in_channels, out_channels, edge_attr_channels, sample_data, dataset_stats)
+            else:
+                model = model_config["constructor"](in_channels, out_channels, sample_data, dataset_stats)
 
             lit_model = LitGraphModel(model, num_classes=out_channels, learning_rate=1e-4)
 
             tb_logger = TensorBoardLogger("logs", name=dataset_name)
-            # Initialize Trainer with enhanced configuration
+            precision_setting = "16-mixed"
+            if isinstance(model, DHGModelWrapper):
+                precision_setting = 32
+            fast_dev = bool(int(os.environ.get("FAST_DEV_RUN", "0")))
             trainer = pl.Trainer(
                 max_epochs=MAX_EPOCHS,
-                callbacks=[
-                    TQDMProgressBar(refresh_rate=5),
-                    # ModelCheckpoint(
-                    #     monitor='val_acc',
-                    #     mode='max',
-                    #     save_top_k=1,  # Save top 3 models
-                    #     filename='{epoch}-{val_acc:.4f}'
-                    # ),
-                    # pl.callbacks.EarlyStopping(
-                    #     monitor='val_acc',
-                    #     mode='max',
-                    #     patience=125,  # Increased patience
-                    #     min_delta=0.005  # Smaller delta to catch smaller improvements
-                    # )
-                ],
-                # strategy="ddp_find_unused_parameters_true",
+                callbacks=[TQDMProgressBar(refresh_rate=5)],
                 accelerator="auto",
-                gradient_clip_val=0.5,  # Reduced gradient clipping for more stable training
+                gradient_clip_val=0.5,
                 enable_progress_bar=True,
                 log_every_n_steps=1,
-                precision=16,  # Use mixed precision for faster training
-                logger=tb_logger
+                precision=precision_setting,
+                logger=tb_logger,
+                fast_dev_run=fast_dev
             )
 
-            # Train and validate
             trainer.fit(lit_model, datamodule=data_module)
 
-            # Test
             print(f"--- Testing model: {model_name} ---")
             trainer.test(lit_model, datamodule=data_module)
