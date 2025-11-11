@@ -1,0 +1,6 @@
+[submodule "AnalogGenie"]
+	path = AnalogGenie
+	url = https://github.com/xz-group/AnalogGenie
+[submodule "AICircuit"]
+	path = AICircuit
+	url = https://github.com/AvestimehrResearchGroup/AICircuit.git
