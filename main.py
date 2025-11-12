@@ -12,6 +12,7 @@ from models.hypergraph.transformer import HyperTransformer
 from models.hypergraph.dhg_wrappers import DHGModelWrapper, build_dhg_model
 from models.bipartite.bipartite_network import BipartiteGNN
 from models.bipartite.transformer import BipartiteTransformer, LaplacianPositionalTransformer
+from models.graph.basic import GraphBackbone, GraphGCN, GraphGIN, GraphGAT
 
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch_scatter import scatter_mean
@@ -129,8 +130,9 @@ class LitGraphModel(pl.LightningModule):
         outputs = []
         for data in batch:
             data = data.to(self.device)
-            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
-                 out = self.model(data.x, data.edge_index, data.edge_attr)
+            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer, GraphBackbone)):
+                 edge_attr = getattr(data, "edge_attr", None)
+                 out = self.model(data.x, data.edge_index, edge_attr)
             else: # Hyper models
                  out = self.model(data.x, data.hyperedge_index, data)
 
@@ -152,8 +154,9 @@ class LitGraphModel(pl.LightningModule):
         targets = []
         for data in batch:
             data = data.to(self.device)
-            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
-                 out = self.model(data.x, data.edge_index, data.edge_attr)
+            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer, GraphBackbone)):
+                 edge_attr = getattr(data, "edge_attr", None)
+                 out = self.model(data.x, data.edge_index, edge_attr)
             else: # HyperGNN, HyperTransformer
                  out = self.model(data.x, data.hyperedge_index, data)
 
@@ -239,8 +242,9 @@ class LitGraphModel(pl.LightningModule):
         targets = []
         for data in batch:
             data = data.to(self.device)
-            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
-                 out = self.model(data.x, data.edge_index, data.edge_attr)
+            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer, GraphBackbone)):
+                 edge_attr = getattr(data, "edge_attr", None)
+                 out = self.model(data.x, data.edge_index, edge_attr)
             else: # HyperGNN, HyperTransformer
                  out = self.model(data.x, data.hyperedge_index, data)
 
@@ -300,8 +304,9 @@ class LitGraphModel(pl.LightningModule):
         targets = []
         for data in batch:
             data = data.to(self.device)
-            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer)):
-                 out = self.model(data.x, data.edge_index, data.edge_attr)
+            if isinstance(self.model, (BipartiteGNN, BipartiteTransformer, LaplacianPositionalTransformer, GraphBackbone)):
+                 edge_attr = getattr(data, "edge_attr", None)
+                 out = self.model(data.x, data.edge_index, edge_attr)
             else: # HyperGNN, HyperTransformer
                  out = self.model(data.x, data.hyperedge_index, data)
 
@@ -430,6 +435,37 @@ if __name__ == '__main__':
         },
     }
 
+    graph_model_registry = {
+        "GCN": {
+            "constructor": lambda in_c, out_c, *_args, **__kwargs: GraphGCN(
+                in_channels=in_c,
+                hidden_channels=256,
+                out_channels=out_c,
+                num_layers=3,
+                dropout=0.3,
+            )
+        },
+        "GIN": {
+            "constructor": lambda in_c, out_c, *_args, **__kwargs: GraphGIN(
+                in_channels=in_c,
+                hidden_channels=256,
+                out_channels=out_c,
+                num_layers=3,
+                dropout=0.3,
+            )
+        },
+        "GAT": {
+            "constructor": lambda in_c, out_c, *_args, **__kwargs: GraphGAT(
+                in_channels=in_c,
+                hidden_channels=256,
+                out_channels=out_c,
+                num_layers=3,
+                dropout=0.2,
+                heads=4,
+            )
+        },
+    }
+
     enabled_hg_names = os.environ.get("HYP_MODELS")
     if enabled_hg_names:
         requested = [name.strip() for name in enabled_hg_names.split(",") if name.strip()]
@@ -439,6 +475,42 @@ if __name__ == '__main__':
     else:
         hypergraph_models = hypergraph_model_registry
 
+    enabled_graph_names = os.environ.get("GRAPH_MODELS")
+    if enabled_graph_names:
+        requested = [name.strip() for name in enabled_graph_names.split(",") if name.strip()]
+        missing = [name for name in requested if name not in graph_model_registry]
+        if missing:
+            raise ValueError(f"GRAPH_MODELS에 알 수 없는 모델이 포함되어 있습니다: {missing}")
+        graph_models = {name: graph_model_registry[name] for name in requested}
+        if not graph_models:
+            graph_models = graph_model_registry
+    else:
+        graph_models = graph_model_registry
+
+    bipartite_models = {
+        "LaplacianPositionalTransformer": {
+            "constructor": lambda in_c, out_c, edge_c, *_, **__: LaplacianPositionalTransformer(
+                in_channels=in_c,
+                edge_attr_channels=edge_c,
+                hidden_channels=256,
+                out_channels=out_c,
+            )
+        },
+    }
+    bipartite_models.update(graph_models)
+
+    clique_models = {
+        "LaplacianPositionalTransformer": {
+            "constructor": lambda in_c, out_c, edge_c, *_, **__: LaplacianPositionalTransformer(
+                in_channels=in_c,
+                edge_attr_channels=edge_c,
+                hidden_channels=256,
+                out_channels=out_c,
+            )
+        },
+    }
+    clique_models.update(graph_models)
+
     # Define datasets and the models to run on them
     CONFIG = {
         "hypergraph": {
@@ -447,37 +519,21 @@ if __name__ == '__main__':
         },
         "bipartite": {
             "data_path": "classification_bipartite_dataset.pt",
-            "models": {
-                "LaplacianPositionalTransformer": {
-                    "constructor": lambda in_c, out_c, edge_c, *_, **__: LaplacianPositionalTransformer(
-                        in_channels=in_c,
-                        edge_attr_channels=edge_c,
-                        hidden_channels=256,
-                        out_channels=out_c,
-                    )
-                },
-            },
+            "models": bipartite_models,
         },
         "clique": {
             "data_path": "classification_clique_dataset.pt",
-            "models": {
-                "LaplacianPositionalTransformer": {
-                    "constructor": lambda in_c, out_c, edge_c, *_, **__: LaplacianPositionalTransformer(
-                        in_channels=in_c,
-                        edge_attr_channels=edge_c,
-                        hidden_channels=256,
-                        out_channels=out_c,
-                    )
-                },
-            },
+            "models": clique_models,
         },
     }
+
+    batch_size = int(os.environ.get("CLS_BATCH_SIZE", os.environ.get("BATCH_SIZE", 16)))
 
     # --- Training Loop ---
     for dataset_name, dataset_config in CONFIG.items():
         print(f"--- Training on {dataset_name} dataset ---")
 
-        data_module = GraphDataModule(dataset_config["data_path"], batch_size=16) # Moderate batch size for stable training
+        data_module = GraphDataModule(dataset_config["data_path"], batch_size=batch_size) # Moderate batch size for stable training
         data_module.setup()
 
         sample_data = data_module.train_dataset[0]
