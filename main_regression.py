@@ -263,6 +263,26 @@ if __name__ == '__main__':
                 heads=4,
             )
         },
+        "BipartiteTransformer": {
+            "constructor": lambda in_c, out_c, edge_c, *_args, **__kwargs: BipartiteTransformer(
+                in_channels=in_c,
+                edge_attr_channels=max(edge_c, 1),
+                hidden_channels=256,
+                out_channels=out_c,
+                num_layers=2,
+                num_heads=4,
+                dropout=0.2,
+            )
+        },
+        "BipartiteGNN": {
+            "constructor": lambda in_c, out_c, edge_c, *_args, **__kwargs: BipartiteGNN(
+                in_channels=in_c,
+                edge_attr_channels=max(edge_c, 1),
+                hidden_channels=256,
+                out_channels=out_c,
+                num_layers=3,
+            )
+        },
     }
 
     enabled_hg_names = os.environ.get("HYP_MODELS")

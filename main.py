@@ -470,6 +470,26 @@ if __name__ == '__main__':
                 heads=4,
             )
         },
+        "BipartiteTransformer": {
+            "constructor": lambda in_c, out_c, edge_c, *_args, **__kwargs: BipartiteTransformer(
+                in_channels=in_c,
+                edge_attr_channels=max(edge_c, 1),
+                hidden_channels=256,
+                out_channels=out_c,
+                num_layers=2,
+                num_heads=4,
+                dropout=0.2,
+            )
+        },
+        "BipartiteGNN": {
+            "constructor": lambda in_c, out_c, edge_c, *_args, **__kwargs: BipartiteGNN(
+                in_channels=in_c,
+                edge_attr_channels=max(edge_c, 1),
+                hidden_channels=256,
+                out_channels=out_c,
+                num_layers=3,
+            )
+        },
     }
 
     enabled_hg_names = os.environ.get("HYP_MODELS")
@@ -533,10 +553,27 @@ if __name__ == '__main__':
         },
     }
 
+    requested_cls = os.environ.get("CLS_DATASETS")
+    if requested_cls:
+        dataset_items = []
+        missing = []
+        for name in requested_cls.split(","):
+            key = name.strip()
+            if not key:
+                continue
+            if key not in CONFIG:
+                missing.append(key)
+            else:
+                dataset_items.append((key, CONFIG[key]))
+        if missing:
+            raise ValueError(f"CLS_DATASETS에 알 수 없는 항목이 포함되어 있습니다: {missing}")
+    else:
+        dataset_items = list(CONFIG.items())
+
     batch_size = int(os.environ.get("CLS_BATCH_SIZE", os.environ.get("BATCH_SIZE", 16)))
 
     # --- Training Loop ---
-    for dataset_name, dataset_config in CONFIG.items():
+    for dataset_name, dataset_config in dataset_items:
         print(f"--- Training on {dataset_name} dataset ---")
 
         data_module = GraphDataModule(dataset_config["data_path"], batch_size=batch_size) # Moderate batch size for stable training
