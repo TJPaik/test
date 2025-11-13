@@ -464,10 +464,37 @@ if __name__ == '__main__':
             return
         store[key] = {"data_path": path, "models": models}
 
+    def auto_register_design_datasets(store, model_map, design_filter=None):
+        """
+        Automatically register per-design datasets (e.g., regression_hypergraph_dataset_CSVA.pt)
+        so that REG_DATASETS can directly reference them without needing REG_DESIGNS.
+        """
+        for prefix, models in model_map.items():
+            pattern = f"regression_{prefix}_dataset_*.pt"
+            for path in Path(".").glob(pattern):
+                stem = path.stem  # e.g., regression_hypergraph_dataset_CSVA
+                token = stem.split(f"regression_{prefix}_dataset_")[-1].strip()
+                if not token:
+                    continue
+                tag = token.upper()
+                if design_filter and tag not in design_filter:
+                    continue
+                key = f"{prefix}_{tag}"
+                if key in store:
+                    continue
+                register_dataset(store, key, str(path), models)
+
     CONFIG = {}
     register_dataset(CONFIG, "hypergraph", "regression_hypergraph_dataset.pt", hypergraph_models)
     register_dataset(CONFIG, "bipartite", "regression_bipartite_dataset.pt", bipartite_models)
     register_dataset(CONFIG, "clique", "regression_clique_dataset.pt", clique_models)
+
+    design_filter = {d.upper() for d in design_list} if design_list else None
+    per_design_model_map = {
+        "hypergraph": hypergraph_models,
+        "bipartite": bipartite_models,
+        "clique": clique_models,
+    }
 
     for design in design_list:
         tag = design.upper()
@@ -489,6 +516,8 @@ if __name__ == '__main__':
             f"regression_clique_dataset_{tag}.pt",
             clique_models,
         )
+
+    auto_register_design_datasets(CONFIG, per_design_model_map, design_filter)
 
     requested_datasets = os.environ.get("REG_DATASETS")
     if requested_datasets:
