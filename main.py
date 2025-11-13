@@ -1,4 +1,6 @@
 import os
+from datetime import datetime
+from typing import Any, Dict, Optional
 import torch
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
@@ -88,11 +90,23 @@ def compute_hypergraph_stats(subset: Subset):
             max_hyperedge_order = max(max_hyperedge_order, int(counts.max().item()))
     return {"max_hyperedge_order": max_hyperedge_order}
 
+
+def create_logger(dataset_name: str, model_name: str) -> TensorBoardLogger:
+    run_tag = os.environ.get("RUN_TAG", "").strip()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    parts = [model_name, timestamp]
+    if run_tag:
+        parts.append(run_tag)
+    version = "__".join(parts)
+    return TensorBoardLogger("logs", name=dataset_name, version=version)
+
 class LitGraphModel(pl.LightningModule):
-    def __init__(self, model, learning_rate=1e-3, num_classes=None):
+    def __init__(self, model, learning_rate=1e-3, num_classes=None, metadata: Optional[Dict[str, Any]] = None):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
+        self.metadata = (metadata or {}).copy()
+        self.save_hyperparameters(ignore=["model"])
 
         # Determine the number of classes
         if num_classes is not None:
@@ -111,6 +125,14 @@ class LitGraphModel(pl.LightningModule):
             self.criterion = torch.nn.CrossEntropyLoss(weight=self.class_weights)
         else:
             self.criterion = torch.nn.MSELoss()
+
+        hp = {
+            "learning_rate": learning_rate,
+            "num_classes": self.num_classes,
+        }
+        if metadata:
+            hp.update(metadata)
+        self.save_hyperparameters(hp)
 
         # Metrics
         self.train_r2 = R2Score()
@@ -602,9 +624,16 @@ if __name__ == '__main__':
             else:
                 model = model_config["constructor"](in_channels, out_channels, sample_data, dataset_stats)
 
-            lit_model = LitGraphModel(model, num_classes=out_channels, learning_rate=1e-4)
+            metadata = {
+                "task": "classification",
+                "dataset": dataset_name,
+                "model_name": model_name,
+                "batch_size": batch_size,
+                "max_epochs": MAX_EPOCHS,
+            }
+            lit_model = LitGraphModel(model, num_classes=out_channels, learning_rate=1e-4, metadata=metadata)
 
-            tb_logger = TensorBoardLogger("logs", name=dataset_name)
+            tb_logger = create_logger(dataset_name, model_name)
             precision_setting = "16-mixed"
             if isinstance(model, DHGModelWrapper):
                 precision_setting = 32

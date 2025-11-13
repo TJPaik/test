@@ -42,14 +42,16 @@ PYENV_VERSION=torch PYTHONPATH="$PWD:$PYTHONPATH" python -m circuitgraph.dataset
 | --- | --- |
 | `MAX_EPOCHS` | 학습 epoch 수 (기본: 분류 5, 회귀 3) |
 | `HYP_MODELS` | 하이퍼그래프용 모델 목록을 콤마로 지정. 예: `HyperTransformer,HyperGT` |
-| `GRAPH_MODELS` | 그래프/바이파르타이트/스타 단계에서 사용할 GNN 목록. 예: `GCN,GIN,GAT` |
+| `GRAPH_MODELS` | 그래프/바이파르타이트 단계에서 사용할 GNN/Transformer 목록. 예: `GCN,GIN,GAT,BipartiteTransformer,BipartiteGNN` |
 | `FAST_DEV_RUN` | `1`이면 Lightning fast_dev_run 모드로 빠른 검증 |
 | `BATCH_SIZE` | 전역 배치 크기 기본값 (없으면 16). 회귀/분류 각각 `REG_BATCH_SIZE`, `CLS_BATCH_SIZE`로 별도 지정 가능 |
+| `CLS_DATASETS` | 분류 스크립트에서 실행할 데이터셋 subset (`hypergraph,bipartite,clique`). 미지정 시 순차 실행 |
 | `REG_DATASETS` | 회귀 스크립트가 순회할 데이터셋 subset (`hypergraph,bipartite,clique,*_CSVA` 등). 미지정 시 자동 |
 | `REG_USE_LOG1P` | 타깃을 `sign(y)*log1p(|y|)` 스케일로 사용할지(기본 1). `0`이면 원 값 사용 |
 | `REG_MAX_SAMPLES` | 회귀 데이터에서 무작위로 사용할 최대 샘플 수. 미지정 시 전체 |
 | `REG_DESIGNS` | `CSVA,CVA,...` 형태로 지정하면 각 디자인별 하이퍼/바이파르타이트/클릭/스타 세트를 순차 실행 |
 | `CLS_MAX_SAMPLES` | 분류 데이터에서 무작위로 사용할 최대 샘플 수. 미지정 시 전체 |
+| `RUN_TAG` | `RUN_TAG=gin_gpu4` 처럼 지정하면 로그 버전에 태그가 붙어(`logs/<dataset>/GCN__timestamp__gin_gpu4`) 실험 식별이 쉬움 |
 
 ### 1. 분류 실험 (`main.py`)
 
@@ -58,8 +60,8 @@ PYENV_VERSION=torch PYTHONPATH="$PWD:$PYTHONPATH" python -m circuitgraph.dataset
 | 데이터셋 키 | 파일 | 기본 모델 |
 | --- | --- | --- |
 | `hypergraph` | `classification_hypergraph_dataset.pt` | HyperTransformer, HyperGT, DPHGNN, HJRL, AllSetformer, SheafHyperGNN, TFHNN, EHNN, HyperND, PhenomNN (필요 시 `HYP_MODELS`) |
-| `bipartite` | `classification_bipartite_dataset.pt` | LaplacianPositionalTransformer + GCN, GIN, GAT (`GRAPH_MODELS`) |
-| `clique` | `classification_clique_dataset.pt` | LaplacianPositionalTransformer + GCN, GIN, GAT (`GRAPH_MODELS`) |
+| `bipartite` | `classification_bipartite_dataset.pt` | LaplacianPositionalTransformer + GCN, GIN, GAT, BipartiteTransformer, BipartiteGNN (`GRAPH_MODELS`) |
+| `clique` | `classification_clique_dataset.pt` | LaplacianPositionalTransformer + GCN, GIN, GAT, BipartiteTransformer, BipartiteGNN (`GRAPH_MODELS`) |
 
 실행 예시:
 
@@ -85,8 +87,8 @@ python main.py
 | 데이터셋 키 | 파일 | 기본 모델 |
 | --- | --- | --- |
 | `hypergraph[_DESIGN]` | `regression_hypergraph_dataset(_DESIGN).pt` | HyperTransformer, HyperGT, DPHGNN, HJRL, SheafHyperGNN, HyperND, EHNN/ED-HNN, AllSetformer, AllDeepSets, TFHNN, PhenomNN (`HYP_MODELS`) |
-| `bipartite[_DESIGN]` | `regression_bipartite_dataset(_DESIGN).pt` | LaplacianPositionalTransformer + GCN, GIN, GAT (`GRAPH_MODELS`) |
-| `clique[_DESIGN]` | `regression_clique_dataset(_DESIGN).pt` | LaplacianPositionalTransformer + GCN, GIN, GAT (`GRAPH_MODELS`) |
+| `bipartite[_DESIGN]` | `regression_bipartite_dataset(_DESIGN).pt` | LaplacianPositionalTransformer + GCN, GIN, GAT, BipartiteTransformer, BipartiteGNN (`GRAPH_MODELS`) |
+| `clique[_DESIGN]` | `regression_clique_dataset(_DESIGN).pt` | LaplacianPositionalTransformer + GCN, GIN, GAT, BipartiteTransformer, BipartiteGNN (`GRAPH_MODELS`) |
 
 실행 예시:
 
@@ -129,3 +131,9 @@ PYENV_VERSION=torch MAX_EPOCHS=10 python main_regression_prev.py
 5. 회귀 추가 스위치: `REG_USE_LOG1P`, `REG_MAX_SAMPLES`.
 
 위 설정을 조합하면 “데이터셋별·모델별” 실험을 스크립트 수정 없이 수행할 수 있습니다. 필요 시 `logs/` 디렉터리에 생성되는 TensorBoard 런을 통해 각 조합의 loss/MSE/F1 등을 확인하세요.
+
+### 로그/결과 확인
+
+- 각 실행은 `logs/<dataset_name>[/<_reg>]/<model>__YYYYMMDD-HHMMSS__[RUN_TAG]/` 형태로 저장됩니다. 예: `logs/hypergraph/HyperTransformer__20251113-135247__gin_gpu4`.
+- 폴더 안 `hparams.yaml`에 학습 시 사용한 환경변수(`model_name`, `batch_size`, `max_epochs`, `RUN_TAG` 등)이 기록되므로 어떤 실험인지 쉽게 확인할 수 있습니다.
+- `tensorboard --logdir logs` 명령으로 TensorBoard를 띄우면 모든 실행의 `train_loss`, `val_loss`, `val_acc`, `test_acc`, `test_macro_f1`(분류) 또는 `test_loss`, `test_r2`(회귀)를 비교할 수 있습니다.
