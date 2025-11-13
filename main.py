@@ -35,16 +35,22 @@ class GenericDataset(Dataset):
         return self.data[idx]
 
 class GraphDataModule(pl.LightningDataModule):
-    def __init__(self, dataset_path: str, batch_size: int = 32):
+    def __init__(self, dataset_path: str, batch_size: int = 32, max_samples: int | None = None):
         super().__init__()
         self.dataset_path = dataset_path
         self.batch_size = batch_size
+        env_cap = os.environ.get("CLS_MAX_SAMPLES")
+        self.max_samples = max_samples if max_samples is not None else (int(env_cap) if env_cap else None)
         self.train_dataset = None
         self.val_dataset = None
 
     def setup(self, stage: str = None):
         full_dataset = GenericDataset(self.dataset_path)
         indices = list(range(len(full_dataset)))
+        if self.max_samples and len(indices) > self.max_samples:
+            generator = torch.Generator().manual_seed(42)
+            keep_idx = torch.randperm(len(indices), generator=generator)[: self.max_samples].tolist()
+            indices = [indices[i] for i in keep_idx]
         train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
 
         self.train_dataset = Subset(full_dataset, train_indices)

@@ -313,20 +313,40 @@ if __name__ == '__main__':
     }
     clique_models.update(graph_models)
 
-    CONFIG = {
-        "hypergraph": {
-            "data_path": "regression_hypergraph_dataset.pt",
-            "models": hypergraph_models,
-        },
-        "bipartite": {
-            "data_path": "regression_bipartite_dataset.pt",
-            "models": bipartite_models,
-        },
-        "clique": {
-            "data_path": "regression_clique_dataset.pt",
-            "models": clique_models,
-        },
-    }
+    designs_env = os.environ.get("REG_DESIGNS")
+    design_list = [d.strip() for d in designs_env.split(",") if d.strip()] if designs_env else []
+
+    def register_dataset(store, key, path, models):
+        if not path or not os.path.isfile(path):
+            print(f"[WARN] dataset file '{path}' missing; skipping {key}")
+            return
+        store[key] = {"data_path": path, "models": models}
+
+    CONFIG = {}
+    register_dataset(CONFIG, "hypergraph", "regression_hypergraph_dataset.pt", hypergraph_models)
+    register_dataset(CONFIG, "bipartite", "regression_bipartite_dataset.pt", bipartite_models)
+    register_dataset(CONFIG, "clique", "regression_clique_dataset.pt", clique_models)
+
+    for design in design_list:
+        tag = design.upper()
+        register_dataset(
+            CONFIG,
+            f"hypergraph_{tag}",
+            f"regression_hypergraph_dataset_{tag}.pt",
+            hypergraph_models,
+        )
+        register_dataset(
+            CONFIG,
+            f"bipartite_{tag}",
+            f"regression_bipartite_dataset_{tag}.pt",
+            bipartite_models,
+        )
+        register_dataset(
+            CONFIG,
+            f"clique_{tag}",
+            f"regression_clique_dataset_{tag}.pt",
+            clique_models,
+        )
 
     requested_datasets = os.environ.get("REG_DATASETS")
     if requested_datasets:
@@ -343,6 +363,15 @@ if __name__ == '__main__':
         if missing:
             raise ValueError(f"REG_DATASETS에 알 수 없는 항목이 포함되어 있습니다: {missing}")
         dataset_items = order
+    elif design_list:
+        dataset_items = []
+        dataset_priority = ["hypergraph", "bipartite", "clique"]
+        for design in design_list:
+            tag = design.upper()
+            for prefix in dataset_priority:
+                key = f"{prefix}_{tag}"
+                if key in CONFIG:
+                    dataset_items.append((key, CONFIG[key]))
     else:
         dataset_items = list(CONFIG.items())
 
@@ -363,14 +392,15 @@ if __name__ == '__main__':
             edge_attr_channels = 0
 
         print(f"Dataset dimensions - in_channels: {in_channels}, targets: {out_channels}")
-        if dataset_name in {"bipartite", "clique"}:
+        is_graph_dataset = dataset_name.startswith(("bipartite", "clique", "star"))
+        if is_graph_dataset:
             print(f"Edge attribute channels: {edge_attr_channels}")
 
         dataset_stats = compute_hypergraph_stats(data_module.train_dataset) if dataset_name.startswith("hypergraph") else {}
 
         for model_name, model_config in dataset_config["models"].items():
             print(f"--- Training model: {model_name} ---")
-            if dataset_name in {"bipartite", "clique"}:
+            if is_graph_dataset:
                 model = model_config["constructor"](in_channels, out_channels, edge_attr_channels, sample_data, dataset_stats)
             else:
                 model = model_config["constructor"](in_channels, out_channels, sample_data, dataset_stats)
