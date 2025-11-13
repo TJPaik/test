@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -18,6 +19,28 @@ from models.graph.basic import GraphBackbone, GraphGCN, GraphGIN, GraphGAT
 
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch_scatter import scatter_mean
+
+
+def get_run_tag() -> str:
+    return os.environ.get("RUN_TAG", "").strip()
+
+
+def append_metrics_log(metadata: Dict[str, Any], split: str, lines: list[str]) -> None:
+    dataset = metadata.get("dataset", "unknown")
+    model_name = metadata.get("model_name", metadata.get("model", "model"))
+    run_tag = metadata.get("run_tag") or get_run_tag()
+    reports_dir = Path("reports")
+    reports_dir.mkdir(exist_ok=True)
+    filename = f"{dataset}__{model_name}"
+    if run_tag:
+        filename += f"__{run_tag}"
+    log_path = reports_dir / f"{filename}.log"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a") as f:
+        f.write(f"[{split}] {timestamp}\n")
+        for line in lines:
+            f.write(line + "\n")
+        f.write("\n")
 
 
 class GenericDataset(Dataset):
@@ -106,6 +129,8 @@ class LitGraphModel(pl.LightningModule):
         self.model = model
         self.learning_rate = learning_rate
         self.metadata = (metadata or {}).copy()
+        if "run_tag" not in self.metadata:
+            self.metadata["run_tag"] = get_run_tag()
         self.save_hyperparameters(ignore=["model"])
 
         # Determine the number of classes
@@ -374,7 +399,8 @@ class LitGraphModel(pl.LightningModule):
         self.log('test_loss', avg_loss)
 
     def on_test_epoch_end(self):
-        self.log('test_acc', self.test_accuracy.compute())
+        test_acc = self.test_accuracy.compute()
+        self.log('test_acc', test_acc)
         if self.classification:
             cm = self.test_conf_matrix.compute()
             print(f"\nTest Confusion Matrix:\n{cm}")
@@ -383,6 +409,25 @@ class LitGraphModel(pl.LightningModule):
             self.log('test_macro_f1', macro_f1)
             print(f"Test Macro F1: {macro_f1:.4f}")
             print(f"Per-class F1: {per_class_f1}")
+
+            cb = self.trainer.callback_metrics if self.trainer else {}
+            test_loss = cb.get("test_loss")
+            lines = []
+            if test_loss is not None:
+                lines.append(f"test_loss={test_loss.item():.6f}")
+            lines.append(f"test_acc={test_acc.item():.6f}")
+            lines.append(f"macro_f1={macro_f1.item():.6f}")
+            lines.append("per_class_f1=" + ",".join(f"{v:.6f}" for v in per_class_f1.cpu().tolist()))
+            lines.append("confusion_matrix:")
+            for row in cm.cpu().tolist():
+                lines.append("  " + str(row))
+            append_metrics_log(self.metadata, "test", lines)
+            if self.logger and hasattr(self.logger, "experiment"):
+                text = "\n".join(lines)
+                try:
+                    self.logger.experiment.add_text("test_metrics", text, self.current_epoch)
+                except Exception:
+                    pass
 
             self.test_accuracy.reset()
             self.test_conf_matrix.reset()
@@ -630,6 +675,7 @@ if __name__ == '__main__':
                 "model_name": model_name,
                 "batch_size": batch_size,
                 "max_epochs": MAX_EPOCHS,
+                "run_tag": get_run_tag(),
             }
             lit_model = LitGraphModel(model, num_classes=out_channels, learning_rate=1e-4, metadata=metadata)
 

@@ -1,5 +1,7 @@
 import os
+import math
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -18,6 +20,28 @@ from models.graph.basic import GraphBackbone, GraphGCN, GraphGIN, GraphGAT
 from pytorch_lightning.loggers import TensorBoardLogger
 
 torch.set_float32_matmul_precision("medium")
+
+
+def get_run_tag() -> str:
+    return os.environ.get("RUN_TAG", "").strip()
+
+
+def append_metrics_log(metadata: Dict[str, Any], split: str, lines: list[str]) -> None:
+    dataset = metadata.get("dataset", "unknown")
+    model_name = metadata.get("model_name", metadata.get("model", "model"))
+    run_tag = metadata.get("run_tag") or get_run_tag()
+    reports_dir = Path("reports")
+    reports_dir.mkdir(exist_ok=True)
+    filename = f"{dataset}__{model_name}"
+    if run_tag:
+        filename += f"__{run_tag}"
+    log_path = reports_dir / f"{filename}.log"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a") as f:
+        f.write(f"[{split}] {timestamp}\n")
+        for line in lines:
+            f.write(line + "\n")
+        f.write("\n")
 
 
 class GenericDataset(Dataset):
@@ -121,7 +145,10 @@ class LitGraphModel(pl.LightningModule):
         self.nan_tensor = None
 
         self.metadata = (metadata or {}).copy()
+        if "run_tag" not in self.metadata:
+            self.metadata["run_tag"] = get_run_tag()
         self.save_hyperparameters(ignore=["model"])
+        self.test_storage: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def _forward_single(self, data):
         data = data.to(self.device)
@@ -151,6 +178,7 @@ class LitGraphModel(pl.LightningModule):
         else:
             self.test_r2.update(preds, targets)
             self.log('test_loss', loss)
+            self.test_storage.append((preds.detach().cpu(), targets.detach().cpu()))
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -173,6 +201,65 @@ class LitGraphModel(pl.LightningModule):
 
     def on_test_epoch_end(self):
         self._log_r2(self.test_r2, 'test_r2', prog_bar=True)
+        if self.test_storage:
+            preds = torch.cat([p for p, _ in self.test_storage], dim=0)
+            targets = torch.cat([t for _, t in self.test_storage], dim=0)
+            diff = preds - targets
+            mse = torch.mean(diff ** 2).item()
+            mae = torch.mean(torch.abs(diff)).item()
+            rmse = math.sqrt(mse)
+            relative = torch.mean(torch.abs(diff) / torch.clamp(torch.abs(targets), min=1e-6)).item()
+            flat_pred = preds.view(-1)
+            flat_target = targets.view(-1)
+
+            def safe_corr(x: torch.Tensor, y: torch.Tensor) -> float:
+                if x.numel() < 2:
+                    return float("nan")
+                try:
+                    corr = torch.corrcoef(torch.stack([x, y]))[0, 1].item()
+                except Exception:
+                    corr = float("nan")
+                if math.isnan(corr):
+                    return float("nan")
+                return corr
+
+            def rank_tensor(t: torch.Tensor) -> torch.Tensor:
+                order = torch.argsort(t)
+                ranks = torch.zeros_like(order, dtype=torch.float)
+                ranks[order] = torch.arange(t.numel(), dtype=torch.float)
+                return ranks
+
+            pearson = safe_corr(flat_pred, flat_target)
+            spearman = safe_corr(rank_tensor(flat_pred), rank_tensor(flat_target))
+            cb = self.trainer.callback_metrics if self.trainer else {}
+            r2 = cb.get("test_r2")
+            lines = [
+                f"mse={mse:.6f}",
+                f"mae={mae:.6f}",
+                f"rmse={rmse:.6f}",
+                f"relative_error={relative:.6f}",
+                f"pearson={pearson:.6f}",
+                f"spearman={spearman:.6f}",
+            ]
+            if r2 is not None:
+                lines.append(f"r2={r2.item():.6f}")
+            test_loss = cb.get("test_loss")
+            if test_loss is not None:
+                lines.append(f"test_loss={test_loss.item():.6f}")
+            append_metrics_log(self.metadata, "test", lines)
+            if self.logger and hasattr(self.logger, "experiment"):
+                text = "\n".join(lines)
+                try:
+                    for entry in lines:
+                        key, val = entry.split("=", 1)
+                        try:
+                            self.logger.experiment.add_scalar(f"test/{key}", float(val), self.current_epoch)
+                        except ValueError:
+                            pass
+                    self.logger.experiment.add_text("test_metrics", text, self.current_epoch)
+                except Exception:
+                    pass
+            self.test_storage.clear()
 
     def _log_r2(self, metric: R2Score, name: str, prog_bar: bool = False):
         try:
@@ -446,6 +533,7 @@ if __name__ == '__main__':
                 "model_name": model_name,
                 "batch_size": batch_size,
                 "max_epochs": MAX_EPOCHS,
+                "run_tag": get_run_tag(),
             }
             lit_model = LitGraphModel(model, num_targets=out_channels, learning_rate=1e-4, metadata=metadata)
 
