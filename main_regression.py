@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 import pytorch_lightning as pl
 from torch_geometric.data import Dataset
-from pytorch_lightning.callbacks import TQDMProgressBar
+from pytorch_lightning.callbacks import TQDMProgressBar, ModelCheckpoint
 from torchmetrics import R2Score
 
 from models.hypergraph.transformer import HyperTransformer
