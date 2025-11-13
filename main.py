@@ -43,6 +43,26 @@ def append_metrics_log(metadata: Dict[str, Any], split: str, lines: list[str]) -
         f.write("\n")
 
 
+def create_checkpoint_callback(dataset_name: str, model_name: str, monitor: str, mode: str) -> ModelCheckpoint:
+    run_tag = get_run_tag()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_name = f"{model_name}__{timestamp}"
+    if run_tag:
+        base_name += f"__{run_tag}"
+    metric_token = f"{{{monitor}:.4f}}"
+    filename = f"{base_name}-{{epoch:02d}}-{metric_token}"
+    dirpath = Path("checkpoints") / dataset_name
+    dirpath.mkdir(parents=True, exist_ok=True)
+    return ModelCheckpoint(
+        dirpath=str(dirpath),
+        filename=filename,
+        monitor=monitor,
+        mode=mode,
+        save_top_k=1,
+        save_last=False,
+    )
+
+
 class GenericDataset(Dataset):
     def __init__(self, pt_file):
         super().__init__()
@@ -679,6 +699,8 @@ if __name__ == '__main__':
             }
             lit_model = LitGraphModel(model, num_classes=out_channels, learning_rate=1e-4, metadata=metadata)
 
+            monitor_metric = "val_acc"
+            ckpt_callback = create_checkpoint_callback(dataset_name, model_name, monitor_metric, "max")
             tb_logger = create_logger(dataset_name, model_name)
             precision_setting = "16-mixed"
             if isinstance(model, DHGModelWrapper):
@@ -686,7 +708,7 @@ if __name__ == '__main__':
             fast_dev = bool(int(os.environ.get("FAST_DEV_RUN", "0")))
             trainer = pl.Trainer(
                 max_epochs=MAX_EPOCHS,
-                callbacks=[TQDMProgressBar(refresh_rate=5)],
+                callbacks=[TQDMProgressBar(refresh_rate=5), ckpt_callback],
                 accelerator="auto",
                 gradient_clip_val=0.5,
                 enable_progress_bar=True,
@@ -699,4 +721,5 @@ if __name__ == '__main__':
             trainer.fit(lit_model, datamodule=data_module)
 
             print(f"--- Testing model: {model_name} ---")
-            trainer.test(lit_model, datamodule=data_module)
+            ckpt_path = ckpt_callback.best_model_path if ckpt_callback.best_model_path else None
+            trainer.test(datamodule=data_module, ckpt_path=ckpt_path)
