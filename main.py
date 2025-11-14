@@ -88,6 +88,10 @@ class GraphDataModule(pl.LightningDataModule):
         self.max_samples = max_samples if max_samples is not None else (int(env_cap) if env_cap else None)
         self.train_dataset = None
         self.val_dataset = None
+        self.test_dataset = None
+        self.train_ratio = 0.8
+        self.val_ratio = 0.1
+        self.test_ratio = 0.1
 
     def setup(self, stage: str = None):
         full_dataset = GenericDataset(self.dataset_path)
@@ -96,10 +100,20 @@ class GraphDataModule(pl.LightningDataModule):
             generator = torch.Generator().manual_seed(42)
             keep_idx = torch.randperm(len(indices), generator=generator)[: self.max_samples].tolist()
             indices = [indices[i] for i in keep_idx]
-        train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
+        if len(indices) < 2:
+            train_indices, val_indices, test_indices = indices, [], []
+        else:
+            train_indices, test_indices = train_test_split(indices, test_size=self.test_ratio, random_state=42)
+            adjusted_val_ratio = self.val_ratio / max(1e-8, (1 - self.test_ratio))
+            if len(train_indices) >= 2:
+                train_indices, val_indices = train_test_split(train_indices, test_size=adjusted_val_ratio, random_state=42)
+            else:
+                val_indices = train_indices[:]
+                train_indices = []
 
         self.train_dataset = Subset(full_dataset, train_indices)
         self.val_dataset = Subset(full_dataset, val_indices)
+        self.test_dataset = Subset(full_dataset, test_indices)
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=self.collate_fn,)
@@ -108,7 +122,7 @@ class GraphDataModule(pl.LightningDataModule):
         return DataLoader(self.val_dataset, batch_size=self.batch_size, collate_fn=self.collate_fn)
 
     def test_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, collate_fn=self.collate_fn)
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, collate_fn=self.collate_fn)
 
     @staticmethod
     def collate_fn(batch):
@@ -530,31 +544,34 @@ if __name__ == '__main__':
 
     graph_model_registry = {
         "GCN": {
-            "constructor": lambda in_c, out_c, *_args, **__kwargs: GraphGCN(
+            "constructor": lambda in_c, out_c, edge_c=0, *_args, **__kwargs: GraphGCN(
                 in_channels=in_c,
                 hidden_channels=256,
                 out_channels=out_c,
                 num_layers=3,
                 dropout=0.3,
+                edge_attr_channels=edge_c if isinstance(edge_c, int) else 0,
             )
         },
         "GIN": {
-            "constructor": lambda in_c, out_c, *_args, **__kwargs: GraphGIN(
+            "constructor": lambda in_c, out_c, edge_c=0, *_args, **__kwargs: GraphGIN(
                 in_channels=in_c,
                 hidden_channels=256,
                 out_channels=out_c,
                 num_layers=3,
                 dropout=0.3,
+                edge_attr_channels=edge_c if isinstance(edge_c, int) else 0,
             )
         },
         "GAT": {
-            "constructor": lambda in_c, out_c, *_args, **__kwargs: GraphGAT(
+            "constructor": lambda in_c, out_c, edge_c=0, *_args, **__kwargs: GraphGAT(
                 in_channels=in_c,
                 hidden_channels=256,
                 out_channels=out_c,
                 num_layers=3,
                 dropout=0.2,
                 heads=4,
+                edge_attr_channels=edge_c if isinstance(edge_c, int) else 0,
             )
         },
         "BipartiteTransformer": {
