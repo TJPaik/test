@@ -1,5 +1,6 @@
 import os
 from collections import Counter
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -93,6 +94,8 @@ class GraphDataModule(pl.LightningDataModule):
         self.train_ratio = 0.8
         self.val_ratio = 0.1
         self.test_ratio = 0.1
+        seed_env = os.environ.get("CLS_SPLIT_SEED") or os.environ.get("SPLIT_SEED")
+        self.split_seed = int(seed_env) if seed_env is not None else 42
 
     def setup(self, stage: str = None):
         full_dataset = GenericDataset(self.dataset_path)
@@ -146,7 +149,7 @@ class GraphDataModule(pl.LightningDataModule):
             train_indices, test_indices = train_test_split(
                 indices,
                 test_size=self.test_ratio,
-                random_state=42,
+                random_state=self.split_seed,
                 stratify=test_strat,
             )
             adjusted_val_ratio = self.val_ratio / max(1e-8, (1 - self.test_ratio))
@@ -155,7 +158,7 @@ class GraphDataModule(pl.LightningDataModule):
                 train_indices, val_indices = train_test_split(
                     train_indices,
                     test_size=adjusted_val_ratio,
-                    random_state=42,
+                    random_state=self.split_seed,
                     stratify=val_strat,
                 )
             else:

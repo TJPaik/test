@@ -105,21 +105,23 @@ class GraphDataModule(pl.LightningDataModule):
         self.train_ratio = 0.8
         self.val_ratio = 0.1
         self.test_ratio = 0.1
+        seed_env = os.environ.get("REG_SPLIT_SEED") or os.environ.get("SPLIT_SEED")
+        self.split_seed = int(seed_env) if seed_env is not None else 42
 
     def setup(self, stage: str = None):
         full_dataset = GenericDataset(self.dataset_path)
         indices = list(range(len(full_dataset)))
         if self.max_samples and len(indices) > self.max_samples:
-            generator = torch.Generator().manual_seed(42)
+            generator = torch.Generator().manual_seed(self.split_seed)
             keep_idx = torch.randperm(len(indices), generator=generator)[: self.max_samples].tolist()
             indices = [indices[i] for i in keep_idx]
         if len(indices) < 2:
             train_indices, val_indices, test_indices = indices, [], []
         else:
-            train_indices, test_indices = train_test_split(indices, test_size=self.test_ratio, random_state=42)
+            train_indices, test_indices = train_test_split(indices, test_size=self.test_ratio, random_state=self.split_seed)
             adjusted_val_ratio = self.val_ratio / max(1e-8, (1 - self.test_ratio))
             if len(train_indices) >= 2:
-                train_indices, val_indices = train_test_split(train_indices, test_size=adjusted_val_ratio, random_state=42)
+                train_indices, val_indices = train_test_split(train_indices, test_size=adjusted_val_ratio, random_state=self.split_seed)
             else:
                 val_indices = train_indices[:]
                 train_indices = []
