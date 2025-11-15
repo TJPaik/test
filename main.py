@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -100,13 +101,63 @@ class GraphDataModule(pl.LightningDataModule):
             generator = torch.Generator().manual_seed(42)
             keep_idx = torch.randperm(len(indices), generator=generator)[: self.max_samples].tolist()
             indices = [indices[i] for i in keep_idx]
+        def extract_label(sample):
+            y = getattr(sample, "y", None)
+            if y is None or y.ndim == 0:
+                return None
+            if y.dtype not in (torch.float32, torch.float64, torch.int64, torch.int32):
+                return None
+            if y.dim() == 1 and y.numel() > 1:
+                if torch.all((y == 0) | (y == 1)):
+                    total = float(y.sum().item())
+                    if abs(total - 1.0) < 1e-6:
+                        return int(torch.argmax(y).item())
+            return None
+
+        label_lookup = {}
+        if indices:
+            first_label = extract_label(full_dataset[indices[0]])
+            if first_label is None:
+                label_lookup = None
+            else:
+                for idx in indices:
+                    label_lookup[idx] = extract_label(full_dataset[idx])
+                    if label_lookup[idx] is None:
+                        label_lookup = None
+                        break
+        else:
+            label_lookup = None
+
+        def stratify_labels_for(index_subset):
+            if label_lookup is None or not index_subset:
+                return None
+            labels = [label_lookup.get(i) for i in index_subset]
+            if any(lbl is None for lbl in labels):
+                return None
+            counts = Counter(labels)
+            if not counts or min(counts.values()) < 2:
+                return None
+            return labels
+
         if len(indices) < 2:
             train_indices, val_indices, test_indices = indices, [], []
         else:
-            train_indices, test_indices = train_test_split(indices, test_size=self.test_ratio, random_state=42)
+            test_strat = stratify_labels_for(indices)
+            train_indices, test_indices = train_test_split(
+                indices,
+                test_size=self.test_ratio,
+                random_state=42,
+                stratify=test_strat,
+            )
             adjusted_val_ratio = self.val_ratio / max(1e-8, (1 - self.test_ratio))
             if len(train_indices) >= 2:
-                train_indices, val_indices = train_test_split(train_indices, test_size=adjusted_val_ratio, random_state=42)
+                val_strat = stratify_labels_for(train_indices)
+                train_indices, val_indices = train_test_split(
+                    train_indices,
+                    test_size=adjusted_val_ratio,
+                    random_state=42,
+                    stratify=val_strat,
+                )
             else:
                 val_indices = train_indices[:]
                 train_indices = []
